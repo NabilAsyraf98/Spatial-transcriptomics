@@ -1,0 +1,234 @@
+---
+title: "Final_script_A3_CaseStudies"
+author: "Muhammad Nabil Asyraf bin Rustam"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup}
+#point to local library where packages are installed
+.libPaths('/content/Rlib')
+
+#loading packages
+library(Seurat)
+library(SeuratData)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+
+#install data
+options(timeout=600)
+InstallData("stxBrain")
+brain <- LoadData("stxBrain", type = "anterior2")
+```
+
+```{r}
+#visualizing the tissue
+VlnPlot(brain, features = "nCount_Spatial", pt.size = 0.1, layer = "counts") + NoLegend()
+SpatialPlot(brain, features = "nCount_Spatial", slot = "counts", image.alpha = 1)
+```
+
+```{r}
+#normalization
+brain <- SCTransform(brain, assay = "Spatial")
+```
+
+```{r}
+#two genes spatial expression 
+SpatialFeaturePlot(brain, features = c(“Hpca”,“Ttr”))
+```
+
+```{r}
+brain@active.assay <- "Spatial"
+brain <- FindVariableFeatures(brain)
+brain <- ScaleData(brain)
+brain <- RunPCA(brain)
+brain <- FindNeighbors(brain, reduction = "pca", dims = 1:30)
+brain <- FindClusters(brain, resolution = 0.5)
+brain <- RunUMAP(brain, reduction = "pca", dims = 1:30)
+```
+
+```{r}
+#UMAP visualisation + visualisation of umap data on spatial tissue
+p1 <- DimPlot(brain, reduction = "umap", label = TRUE)
+p2 <- SpatialDimPlot(brain, label = TRUE, label.size = 3)
+p1 + p2
+```
+
+```{r}
+#spatial visualisation by clusters 2,1,3,4,5,8
+SpatialDimPlot(brain, cells.highlight = CellsByIdentities(object = brain, idents = c(2, 1, 4, 3,
+    5, 8)), facet.highlight = TRUE, ncol = 3)
+```
+
+```{r}
+#identification of spatially variable genes
+de_markers <- FindMarkers(brain, ident.1 = 5, ident.2 = 6)
+#spatial plot of top 3 most variable genes 
+SpatialFeaturePlot(object = brain, features = rownames(de_markers)[1:3], alpha = c(0.1, 1), ncol = 3)
+```
+
+```{r}
+#observing if the top variable gene in clusters 1,2 and 3 are able to explain the clusters seen
+clustNames <- c("3", "2", "1")
+mks <- sapply(
+  clustNames,
+  function(clust) brain_mks$gene[brain_mks$cluster == clust][1]
+)
+SpatialDimPlot(
+  brain,
+  cells.highlight = CellsByIdentities(object = brain, idents = c(3,2,1)),
+  facet.highlight = TRUE
+)
+brain@active.assay <- "SCT"
+SpatialFeaturePlot(brain, features = mks,  slot = "data", image.alpha = 0)
+
+```
+
+```{r}
+#subsetting to see the spatial resolution of clusters
+cortex <- subset(brain, idents = c(2,4,9,8,5))
+p1 <- SpatialDimPlot(cortex, crop = TRUE, label = TRUE)
+p2 <- SpatialDimPlot(cortex, crop = FALSE, label = TRUE, pt.size.factor = 1, label.size = 3)
+p1 + p2
+```
+
+```{r}
+#Seurat V3 soft classification - reference-based cell type transfer
+suppressPackageStartupMessages(library(Seurat))
+suppressPackageStartupMessages(library(SeuratData))
+suppressPackageStartupMessages(library(ggplot2))
+
+#loading data, reference is a subset of original
+#loading data again for preprocessing with different normalisation method (log)
+allen_reference <- readRDS("/content/allen_featFiltered.rds")
+brain <- LoadData("stxBrain", type = "anterior2")
+
+# Preprocess query
+brain <- NormalizeData(brain, assay = "Spatial")
+brain@active.assay <- "Spatial"
+brain <- FindVariableFeatures(brain)
+brain <- ScaleData(brain)
+brain <- RunPCA(brain)
+brain <- FindNeighbors(brain, reduction = "pca", dims = 1:30)
+# Preprocess ref
+allen_reference <- NormalizeData(allen_reference)
+allen_reference <- FindVariableFeatures(allen_reference)
+allen_reference <- ScaleData(allen_reference)
+allen_reference <- RunPCA(allen_reference)
+allen_reference <- RunUMAP(allen_reference, dims = 1:30)
+
+#observing the number of clusters in reference
+DimPlot(allen_reference, group.by = "subclass", label = TRUE) + theme(legend.position = "none")
+
+#transfer cell-type annotations as predictions
+anchors <- FindTransferAnchors(
+  reference = allen_reference, query = brain
+)
+predictions.assay <- TransferData(
+  anchorset = anchors, refdata = allen_reference$subclass, prediction.assay = TRUE,
+  weight.reduction = brain[["pca"]], dims = 1:30
+)
+brain[["predictions"]] <- predictions.assay
+DefaultAssay(brain) <- "predictions"
+
+unique(allen_reference$subclass) |> sort()
+#plotting for different cell types
+library(patchwork)
+plot1 <-SpatialFeaturePlot(brain, features = c("Oligo"), pt.size.factor = 1.6, crop = T, image.alpha = 0)
+plot2 <-SpatialFeaturePlot(brain, features = c("L2/3 IT"), pt.size.factor = 1.6, crop = T, image.alpha = 0)
+plot3 <-SpatialFeaturePlot(brain, features = c("L4"), pt.size.factor = 1.6, crop = T, image.alpha = 0)
+plot4 <- SpatialFeaturePlot(brain, features = c("L5 IT"), pt.size.factor = 1.6, crop = T, image.alpha = 0)
+(plot1 | plot2)/(plot3 | plot4)
+
+```
+
+```{r}
+#PhiSpace cell-type deconvulation
+suppressPackageStartupMessages(library(PhiSpace))
+source("/content/VizSpatial.R")
+
+assayNames=query
+brain@active.assay <- "Spatial"
+
+#creating objects for reference and query
+reference <- as.SingleCellExperiment(allen_reference)
+query <- as.SingleCellExperiment(brain)
+colData(query)[,c("x","y")] <- cbind(
+  brain@images$anterior2@boundaries$centroids@coords[,2],
+  -brain@images$anterior2@boundaries$centroids@coords[,1]
+)
+
+#normalisation
+reference <- logTransf(
+    reference, use_log1p = TRUE, targetAssay = "log1p"
+  )
+query <- logTransf(
+    query, use_log1p = TRUE, targetAssay = "log1p"
+)
+
+#supervised feature selection based on PLS.
+PhiAssay <- "log1p"
+YtrainName <- "subclass"
+if(T){
+    impScores <- readRDS("/content/impScores.rds")
+} else {
+    # Not enough RAM to run
+    tuneRes <- PhiSpace::tunePhiSpace(
+      reference = reference,
+      assayName = PhiAssay,
+      phenotypes = YtrainName,
+      tune_ncomp = F,
+      tune_nfeat = F
+    )
+    impScores <- tuneRes$impScores
+}
+
+#selecting top 500 features that explain each cell type
+selectedFeat <- selectFeat(impScores, 500)$selectedFeat
+length(
+  intersect(
+    selectedFeat, rownames(query)))
+
+#training model
+PhiRes <- PhiSpace::PhiSpaceR_1ref(
+  reference,
+  query,
+  phenotypes = YtrainName,
+  PhiSpaceAssay = PhiAssay,
+  selectedFeat = selectedFeat,
+  regMethod = "PLS",
+  center = T,
+  scale = F
+)
+reducedDim(query, "PhiSpace") <- normPhiScores(PhiRes$PhiSpaceScore)
+
+colnames(reducedDim(query, "PhiSpace")) |> sort()
+
+#plotting
+source("/content/VizSpatial.R")
+suppressPackageStartupMessages(library(dplyr))
+library(patchwork)
+
+# Define the list of features for plotting
+features_to_plot <- c("L2/3 IT", "L4", "L5 IT", "L5 PT", "L6 CT", "L6 IT", "L6b")
+
+# Create a list of plots for each feature
+plots <- lapply(features_to_plot, function(feature) {
+  VizSpatial(
+    query,
+    predPheno = feature,  # Dynamically change the feature
+    predMethod = "PhiSpace",
+    censor = TRUE
+  )
+})
+
+# Combine all plots into a grid using patchwork
+combined_plot <- wrap_plots(plots, ncol = 3)  # Adjust ncol for grid structure
+
+# Display the combined plot
+combined_plot
+
+```
